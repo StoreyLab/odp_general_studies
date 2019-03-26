@@ -1,0 +1,576 @@
+---
+title: "The optimal discovery procedure for general gene expression studies: Main figures"
+author: "Andrew J. Bass"
+date: "March 17, 2019"
+header-includes:
+  - \usepackage{graphicx}
+  - \usepackage{subcaption}
+---
+
+```{r setup, include=FALSE}
+library(cowplot)
+library(tidyverse)
+library(limma)
+library(VennDiagram)
+library(grid)
+library(scales)
+library(qvalue)
+library(biobroom)
+library(gridExtra)
+library(edge)
+library(splines)
+library(GEOquery)
+library(stringr)
+library(ExpressionAtlas)
+library(msigdbr)
+library(biomaRt)
+library(hgu133b.db)
+library(hgu133a.db)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Figure 1
+
+```{r endotoxin}
+as.numeric.factor <- function(x) {as.numeric(levels(x))[x]}
+
+# load data and create models
+cov <- read.table("../data/raw_data/CR001_cov.txt")
+cov <- as_data_frame(t(cov))
+names(cov) <- c("class", "individual", "time")
+cov = cov[-1,]
+# Change column type
+cov$time <- as.numeric(cov$time)
+cov$individual <- as.factor(cov$individual)
+cov$class <- as.factor(cov$class) 
+expression <- log2(as.matrix(read.table("../data/raw_data/CR001_expr.txt")) + 10)
+rnames <- read.table("../data/raw_data/CR001_genes.txt")$V1
+rownames(cov) <- NULL
+colnames(expression) <- NULL
+rownames(expression) <- 1:nrow(expression)
+nmod <- ~ns(time, df = 4) 
+fmod <- ~ns(time, df = 4) * class 
+endotoxin <- build_models(data = expression, cov = cov, full.model = fmod, null.model = nmod, ind = cov$individual)
+out <- fit_models(endotoxin)
+
+# Fit models
+theme_update(plot.title = element_text(hjust = 0.5))
+tmp = lm(expression[442,]~ns(cov$time, df = 4) * cov$class, data = cov)
+tmp2 = lm(expression[442,]~ns(cov$time, df = 4), data = cov)
+
+
+df <- data.frame(expression = expression[442,], time = cov$time, Group = cov$class, full = tmp$fit, null = tmp2$fit)
+p1 <- df %>%
+  ggplot(aes(x = time , y = expression, shape = Group)) +
+  geom_point(size = 3) +
+  theme_bw() +
+  scale_color_brewer(palette="Set1") +
+  geom_smooth( method = "lm",  aes(group = Group), formula = y ~ splines::ns(x, df = 4), se = FALSE, color = "black")  +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Time (hr)") +
+  ylab("Expression (log)") +
+  geom_smooth(data=df, aes(x=time, y= null), color = "black", linetype = "dashed", method = "lm",   formula = y ~ splines::ns(x, df = 4), se = FALSE) +
+  theme(legend.position = "none") +
+  scale_shape_manual(values=c(4,2))
+```
+
+```{r kidney}
+# load data and create models
+infile <- "../data/raw_data/"
+outfile <- "../data/"
+edata <- read_delim(paste0(infile, "kidney_expr.txt"), delim = "\t", col_names = FALSE)
+pdata <-  t(read_delim(paste0(infile, "kidney_cov.txt"), delim = "\t", col_names = FALSE))
+filter.probes <- readRDS(paste0(outfile, "filter_probes.rds"))
+colnames(pdata) <- c("tissue", "age","pathology", "creatinine", "sex","gfr")
+rnames <- read_delim("../data/raw_data/kidney_genes.txt", delim = "\t", col_names = FALSE)
+pdata = type_convert(as_tibble(pdata[-1,])) #convert numeric
+edata <- log2(edata[filter.probes, pdata$tissue == "c"] + 10)
+rnames <- rnames$X1[filter.probes]
+pdata <- pdata[pdata$tissue == "c",]
+pdata$sex <- as.factor(pdata$sex)
+colnames(edata) <- rownames(pdata) <- NULL
+
+# create models
+full_model <- ~sex + ns(age, df = 4)
+null_model <- ~sex
+
+kidney <- edge::build_models(data = as.matrix(edata),
+                             cov = pdata,
+                             full.model = full_model,
+                             null.model = null_model)
+
+out <- fit_models(kidney)
+
+# fit linear models
+theme_update(plot.title = element_text(hjust = 0.5))
+tmp = lm(as.numeric(edata["2700",])~as.factor(pdata$sex) + ns(pdata$age, df = 4), data = pdata)
+tmp2 = lm(as.numeric(edata[2700,])~as.factor(pdata$sex), data = pdata)
+
+df <- data.frame(expression = as.numeric(edata["2700",]), age = pdata$age, Sex = pdata$sex, full = tmp$fit, null = tmp2$fit)
+p2 <- df %>%
+  ggplot(aes(x = age , y = expression)) +
+  geom_point(shape = 4, size = 3) +
+  theme_bw() +
+  scale_color_brewer(palette="Set1") +
+  geom_smooth( method = "lm",   formula = y ~ splines::ns(x, df = 4), se = FALSE, color = "black") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Age") +
+  ylab("Expression (log)") +
+  geom_smooth( method = "lm", formula = y ~ 1, color = "black", linetype = "dashed", se = FALSE)
+```
+
+
+```{r dose}
+# Load data and create models
+gds <- getGEO("GSE4668") 
+eset <- gds$GSE4668_series_matrix.txt.gz
+pdata <- as.data.frame(eset@phenoData@data) %>% dplyr::select(title, geo_accession) %>% mutate(title = as.character(title))
+pdata <- pdata[1:25,]
+pdata$dose <- as.numeric(unlist(lapply(str_split(pdata$title, " "), FUN = function(x) x[2]))[1:25])
+expression <- log2(eset@assayData$exprs[, 1:25] + 10)
+
+# Model
+fmod = ~1 + ns(dose, df = 2)
+nmod = ~1
+rownames(expression) <-  colnames(expression) <- rownames(pdata) <- NULL
+
+# apply edge/odp package
+dose <- build_models(data = as.matrix(expression), cov = pdata, full.model = fmod, null.model = nmod)
+theme_update(plot.title = element_text(hjust = 0.5))
+tmp = lm(as.numeric(expression[2575,])~ ns(pdata$dose, df = 2), data = pdata)
+tmp2 = lm(as.numeric(expression[2575,])~1, data = pdata)
+
+df <- data.frame(expression = expression[2575,], dose = pdata$dose, full = tmp$fit, null = tmp2$fit)
+p3 <- df %>%
+  ggplot(aes(x = dose , y = expression)) +
+  geom_point(shape = 4, size = 3) +
+  theme_bw() +
+  scale_color_brewer(palette="Set1")  +
+  geom_smooth(method = "lm", formula = y ~ splines::ns(x, df = 2), se = FALSE, color = "black") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("E2 dose (pM)") +
+  ylab("Expression (log)") + 
+  geom_smooth(method = "lm", formula = y ~ 1, color = "black", linetype = "dashed", se = FALSE)
+```
+
+
+```{r smoker}
+# load data set
+experimentSummary <- getAtlasExperiment(experimentAccession  = "E-GEOD-47718")
+rse_gene = experimentSummary$rnaseq
+edata <- assay(rse_gene)
+edata = edata[rowSums(edata) >= 10, ]
+pdata <- colData(rse_gene)
+pdata$condition = pdata$clinical_information
+pdata$technical_replicate_group[pdata$technical_replicate_group[1] == pdata$technical_replicate_group] <- rep(paste0("group", 17:1), each = 1)
+colnames(edata) <- pdata$technical_replicate_group
+edata = reshape2::melt(edata) %>%
+  group_by(Var1, Var2) %>% 
+  summarise(total = sum(value)) %>%
+  spread(Var2, total)
+edata = edata[, -1]
+pdata = unique(pdata)
+
+# create models
+null_model <- ~1
+full_model <- ~factor(condition)
+pdata <-  as.data.frame(pdata) %>% dplyr::select(condition)
+# mean-variance relationship
+vm = limma::voom(edata, design = model.matrix(full_model, pdata))
+colnames(vm$E) <- rownames(pdata)
+edata <- vm$E
+
+# fit linear models
+theme_update(plot.title = element_text(hjust = 0.5))
+tmp = lm(as.numeric(edata[788,])~ pdata$condition, weights = vm$weights[788,], data = pdata)
+tmp2 = lm(as.numeric(edata[788,])~1, weights = vm$weights[788,], data = pdata)
+
+df <- data.frame(expression = as.numeric(edata[788,]), condition = pdata$condition, full = tmp$fit, null = tmp2$fit)
+p4 <- df %>%
+  ggplot(aes(x = as.factor(condition), y = expression, group = 1)) + 
+  geom_point(shape = 4, size = 3) +
+  theme_bw() +
+  scale_color_brewer(palette="Set1")  +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "black") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Group") +
+  ylab("Expression (logCPM)") +
+  geom_smooth(method = "lm", formula = y ~ 1, color = "black", linetype = "dashed", se = FALSE)
+```
+
+```{r}
+# Combine figures
+prow <- cowplot::plot_grid(p4 + theme_bw(base_size = 20) + theme(legend.position = "none", axis.text= element_text(size = 18), plot.title = element_text(hjust = 0.5)),
+                           p2 + theme_bw(base_size = 20) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5),  axis.text = element_text(size = 18)),
+                           p3 + theme_bw(base_size = 20) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5),  axis.text = element_text(size = 18)),
+                           p1+ theme_bw(base_size = 20) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5), axis.text = element_text(size = 18)), nrow = 2, labels = c("a", "b", "c", "d"), label_size = 20)
+
+ggsave(prow, filename = "./figures/lsi_fig2.pdf", width = 12, height = 8)
+```
+
+## Figure 2
+
+```{r, message = FALSE, warning = FALSE, eval = TRUE, dependson=c("kidney","endotoxin","dose")}
+# svd function
+svd.clean <- function(x, space=c("rows", "columns"), center=TRUE, scale=FALSE) {
+  space <- match.arg(space)
+  if(space=="columns") {x <- t(x)}
+  x <- t(scale(t(x), center=center, scale=scale))
+  x <- x/sqrt(nrow(x)-1)
+  s <- svd(x)
+  pve <- s$d^2 / sum(s$d^2)
+  if(space=="columns") {pc <- t(pc); loading <- t(loading)}
+  return(list(rsv = s$v, pve=pve))
+}
+
+# Generalized cross validation
+gcv <- function(edata, x, L =4, p = 2:5) {
+  library(mgcv)
+  out.svd <- svd.clean(edata, center = TRUE)$rsv[, 1:L]
+  out <- NULL
+  for (i in p) {
+    for (j in 1:L) {
+      dat <- data.frame( x= x, y = out.svd[,j])
+      gcv <- length(x) * sum(lm(y ~1 + ns(x, df = i) , data = dat)$residuals^2) / (length(x) - (i+1))^2 
+      out <- rbind(out, data.frame(gcv = gcv, L = j, df = i))
+    }
+  }
+  out
+}
+
+# Create data frames for cross validation plot
+kidney_gcv <- data.frame(gcv(exprs(kidney), x = pData(kidney)$age, p = 1:10), study = "Kidney")
+G = pData(endotoxin)$class
+endotoxin_gcv1 <- data.frame(gcv(exprs(endotoxin)[, G == "endotoxin"], x = pData(endotoxin)$time[G == "endotoxin"], p =1:4), study = "Endotoxin-treatment")
+endotoxin_gcv2 <- data.frame(gcv(exprs(endotoxin)[, G == "control"], x = pData(endotoxin)$time[G == "control"], p = 1:4), study = "Endotoxin-control")
+dose_gcv <- data.frame(gcv(exprs(dose), x = pData(dose)$dose, p = 1:4), study = "Dose")
+df <- rbind(endotoxin_gcv1, endotoxin_gcv2, kidney_gcv, dose_gcv)
+df_lines <- data.frame(study = c("Kidney", "Endotoxin-control", "Dose", "Endotoxin-treatment"), values = c(4, 1, 2, 4))
+
+integer_breaks <- function(n = 5, ...) {
+  breaker <- pretty_breaks(n, ...)
+  function(x) {
+     breaks <- breaker(x)
+     breaks[breaks == floor(breaks)]
+  }
+}
+
+out <- df %>% mutate(`Eigen-gene` = as.factor(L)) %>%
+  ggplot(aes(x = df, y = gcv, color = `Eigen-gene`)) +
+  geom_point(size = 2) +
+  geom_line(size = 1) +
+  geom_vline(data = df_lines, aes(xintercept = values), size = 1, linetype = "dashed") +
+  theme_bw(base_size = 16) +
+  facet_wrap(~study, scales = "free") +
+  xlab("Degrees of freedom") +
+  ylab("GCV") +
+  scale_x_continuous(breaks= integer_breaks()) +
+  scale_color_brewer(palette="Set1")
+ggsave(out, filename = "../analysis/figures/basis_dimension.pdf", width = 9, height =5)
+```
+
+## Figure 3
+
+```{r, message = FALSE, warning = FALSE}
+sig_cutoff <- function(obj, cuts) {
+  out <- sapply(cuts, function(x) c("q-value"=sum(obj$q.value < x)))
+  out
+}
+
+# Load data
+df_smoker <- readRDS("../data/smoker_comp.rds")
+df_endotoxin <- readRDS("../data/endotoxin_comp.rds")
+df_kidney <- readRDS("../data/kidney_comp.rds")
+df_dose <- readRDS("../data/dose_comp.rds")
+df <- rbind(df_dose, df_endotoxin, df_kidney, df_smoker)
+
+# Rename
+df$Method <- plyr::revalue(df$Method, c("ODP"="mODP"))
+
+# color blind friendly
+cbbPalette <- c("#000000",  "#009E73",  "#0072B2", "#E69F00", "#56B4E9", "#F0E442", "#D55E00", "#CC79A7")
+
+# Significant genes vs. q-value cutoff
+cuts <- seq(0.0001, 0.1, 0.0001) 
+theme_update(plot.title = element_text(hjust = 0.5))
+out <- df %>%
+  group_by(Method, study) %>%
+  do(data.frame(num_sig = sig_cutoff(., cuts = cuts), cutoff = cuts)) %>%
+  ggplot(aes(x = cutoff, y = num_sig, color = Method)) +
+  geom_line(size = 1) +
+  xlab("q-value cutoff") +
+  ylab("Number of significant genes") +
+  theme_bw(base_size = 16) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_manual(values=cbbPalette) + facet_wrap(~study, scales = "free")
+
+ggsave(out, filename = "./figures/observed_power.pdf", width = 9, height = 6.5)
+```
+
+## Figure 4
+
+```{r, message = FALSE, warning = FALSE}
+get_counts <- function(dat) {
+  tmp <- dat %>% 
+    ungroup() %>% 
+    group_by(Method) %>%
+    mutate(id = 1:length(names)) %>%
+    ungroup() %>%
+    mutate(sig = as.numeric(q.value < 0.1)) %>% 
+    dplyr::select(Method, sig, id) %>%
+    spread(Method, sig)
+
+  n12 <- table(tmp[, c(2,3)])[2,2]
+  n13 <- table(tmp[, c(2,4)])[2,2]
+  n23 <- table(tmp[, c(3,4)])[2,2]
+  n123 <- sum(rowSums(tmp[, c(2,3,4)]) == 3)
+  data.frame(n1 = sum(tmp$ODP), n2 = sum(tmp$`F-test`), n3 = sum(tmp$`Moderated
+F-test`), n12 = n12, n13 = n13, n23=n23, n123=n123)
+}
+count <- get_counts(df_dose)
+g1 = draw.triple.venn(area1 = count$n1,
+                 area2 = count$n2,
+                 area3 = count$n3,
+                 n12 = count$n12,
+                 n23 = count$n23,
+                 n13 = count$n13,
+                 n123 = count$n123, cex = 1.5,
+                 lty = "blank",
+                 fill = c("#000000",  "#009E73",  "#0072B2"), ind = FALSE)
+
+count <- get_counts(df_kidney)
+g2 = draw.triple.venn(area1 = count$n1,
+                 area2 = count$n2,
+                 area3 = count$n3,
+                 n12 = count$n12,
+                 n23 = count$n23,
+                 n13 = count$n13, cex = 1.5,
+                 n123 = count$n123,
+                 lty = "blank",
+                 fill = c("#000000",  "#009E73",  "#0072B2"), ind = FALSE)
+
+count <- get_counts(df_endotoxin)
+g3 = draw.triple.venn(area1 = count$n1,
+                 area2 = count$n2,
+                 area3 = count$n3,
+                 n12 = count$n12,
+                 n23 = count$n23,
+                 n13 = count$n13,
+                 n123 = count$n123, cex = 1.5,
+                 lty = "blank",
+                 fill = c("#000000",  "#009E73",  "#0072B2"), ind = FALSE)
+
+count <- get_counts(df_smoker)
+g4 = draw.triple.venn(area1 = count$n1,
+                 area2 = count$n2,
+                 area3 = count$n3,
+                 n12 = count$n12,
+                 n23 = count$n23,
+                 n13 = count$n13,
+                 n123 = count$n123, cex = 1.5,
+                 lty = "blank",
+                 fill = c("#000000",  "#009E73",  "#0072B2"), ind = FALSE)
+ 
+t1 = arrangeGrob(grob = grobTree(g1), top = textGrob("Dose", gp=gpar(fontsize=18)))
+t2 = arrangeGrob(grob = grobTree(g3), top =  textGrob("Endotoxin", gp=gpar(fontsize=18)))
+t3 = arrangeGrob(grob = grobTree(g2), top =  textGrob("Kidney", gp=gpar(fontsize=18)))
+t4 = arrangeGrob(grob = grobTree(g4), top =  textGrob("Smoker", gp=gpar(fontsize=18)))
+
+cols <-c("#000000",  "#009E73",  "#0072B2")
+p1 <- data.frame(Method = c("F-test", "mODP", "Moderated\nF-test"), tot = c(10,10,10)) %>% ggplot(aes(tot, fill = Method)) + geom_bar( alpha = 0.5) + scale_fill_manual(values=cols, labels =c("mODP","F-test", "Moderated\nF-test") )
+lg2 <- cowplot::get_legend(p1 + theme_bw(base_size = 16))
+pgrid <- cowplot::plot_grid(t1,t2,t3,t4, nrow = 2)
+out <- cowplot::plot_grid(pgrid, lg2, rel_widths = c(3,.45))
+ggsave(out, filename = "../analysis/figures/venn_diagram.pdf", width = 9, height = 6.5)
+```
+
+## Figure 5a
+
+```{r,  message = FALSE, warning = FALSE, fig.width=12}
+m_df = msigdbr(species = "Homo sapiens")
+df_kidney <- readRDS("../data/kidney_comp.rds")
+probes <- lapply(df_kidney[,5], as.character)[[1]]
+mappinga <- mapIds(hgu133a.db, keys = probes, keytype= "PROBEID", "ENTREZID", multiVals = "first")
+mappingb <- mapIds(hgu133b.db, keys = probes, keytype= "PROBEID", "ENTREZID", multiVals = "first")
+mapping <- rbind(mappinga,mappingb)
+mapping <- apply(mapping,2, FUN = function(x) ifelse(is.na(x[1]), x[2], x[1]))
+df_kidney$entrez_gene <- as.numeric(mapping)
+gene_set <- df_kidney %>% 
+  group_by(Method) %>%
+  mutate(pi0 = max(q.value), avg.lfdr = mean(1 - lfdr)) %>% 
+  inner_join(m_df, by = "entrez_gene")
+
+enrichment.stats1 <- gene_set %>%
+  group_by(Method) %>%
+  mutate(pi0 = max(q.value)) %>% ungroup() %>%
+  group_by(study, Method, gs_id, gs_cat, gs_name, avg.lfdr, pi0) %>% filter(length(gs_id) > 25) %>% 
+  summarise(TPE = mean(1-lfdr), ESE = mean(qnorm(1 - p.value) * (1-lfdr)) / avg.lfdr[1])
+cbbPalette <- c("#000000",  "#009E73",  "#0072B2", "#E69F00", "#56B4E9", "#F0E442", "#D55E00", "#CC79A7")
+```
+
+## Figure 5b
+
+```{r,  message = FALSE, warning = FALSE, fig.width=12}
+m_df = msigdbr(species = "Homo sapiens")
+df_endotoxin <- readRDS("../data/endotoxin_comp.rds")
+probes <- lapply(df_endotoxin[,5], as.character)[[1]]
+mappinga <- mapIds(hgu133a.db, keys = probes, keytype= "PROBEID", "ENTREZID", multiVals = "first")
+mappingb <- mapIds(hgu133b.db, keys = probes, keytype= "PROBEID", "ENTREZID", multiVals = "first")
+mapping <- rbind(mappinga,mappingb)
+mapping <- apply(mapping,2, FUN = function(x) ifelse(is.na(x[1]), x[2], x[1]))
+df_endotoxin$entrez_gene <- as.numeric(mapping)
+gene_set <- df_endotoxin %>% 
+  group_by(Method) %>%
+  mutate(pi0 = max(q.value), avg.lfdr = mean(1 - lfdr)) %>% 
+  inner_join(m_df, by = "entrez_gene")
+
+enrichment.stats2 <- gene_set %>%
+  group_by(Method) %>%
+  mutate(pi0 = max(q.value)) %>% ungroup() %>%
+  group_by(study, Method, gs_id, gs_cat, gs_name, avg.lfdr, pi0) %>% filter(length(gs_id) > 25) %>% 
+  summarise(TPE = mean(1-lfdr) , ESE = mean(qnorm(p.value, lower.tail = FALSE) * (1-lfdr)) / avg.lfdr[1])
+cbbPalette <- c("#000000",  "#009E73",  "#0072B2", "#E69F00", "#56B4E9", "#F0E442", "#D55E00", "#CC79A7")
+```
+
+## Figure 5c
+
+```{r,  message = FALSE, warning = FALSE, fig.width=12}
+ensembl <- useMart("ensembl", dataset="hsapiens_gene_ensembl")
+annot<-getBM(c("ensembl_gene_id", "chromosome_name", "strand", "start_position", "end_position","gene_biotype", "entrezgene"), mart=ensembl)
+m_df = msigdbr(species = "Homo sapiens")
+
+df_smoker <- readRDS("../data/smoker_comp.rds")
+out <- df_smoker %>%
+  dplyr::rename(ensembl_gene_id = names) %>%
+  inner_join(annot) %>%
+  dplyr::rename(entrez_gene = entrezgene)
+
+gene_set <- out %>% 
+  group_by(Method) %>%
+  mutate(pi0 = max(q.value), avg.lfdr = mean(1 - lfdr)) %>% 
+  inner_join(m_df, by = "entrez_gene")
+
+enrichment.stats3 <- gene_set %>%
+  group_by(Method) %>%
+  mutate(pi0 = max(q.value)) %>% ungroup() %>%
+  group_by(study, Method, gs_id, gs_cat, gs_name, avg.lfdr, pi0) %>% filter(length(gs_id) > 25) %>% 
+  summarise(TPE = mean(1-lfdr), ESE = mean(qnorm(p.value, lower.tail = FALSE) * (1-lfdr)) / avg.lfdr[1])
+cbbPalette <- c("#000000",  "#009E73",  "#0072B2", "#E69F00", "#56B4E9", "#F0E442", "#D55E00", "#CC79A7")
+```
+
+
+## Figure 5d
+
+```{r,  message = FALSE, warning = FALSE, fig.width=12}
+m_df = msigdbr(species = "Homo sapiens")
+df_dose <- readRDS("../data/dose_comp.rds")
+probes <- lapply(df_dose[,5], as.character)[[1]]
+mapping <- mapIds(hgu133a.db, keys = probes, keytype= "PROBEID", "ENTREZID", multiVals = "first")
+
+df_dose$entrez_gene <- as.numeric(mapping)
+gene_set <- df_dose %>% 
+  group_by(Method) %>%
+  mutate(pi0 = max(q.value), avg.lfdr = mean(1 - lfdr)) %>% 
+  inner_join(m_df, by = "entrez_gene")
+
+enrichment.stats4 <- gene_set %>%
+  group_by(Method) %>%
+  mutate(pi0 = max(q.value)) %>% ungroup() %>%
+  group_by(study, Method, gs_id, gs_cat, gs_name, avg.lfdr, pi0) %>% filter(length(gs_id) > 25) %>% 
+  summarise(TPE = mean(1-lfdr) , ESE = mean(qnorm(p.value, lower.tail = FALSE) * (1-lfdr)) / avg.lfdr[1])
+cbbPalette <- c("#000000",  "#009E73",  "#0072B2", "#E69F00", "#56B4E9", "#F0E442", "#D55E00", "#CC79A7")
+```
+
+## Figure 5 combined
+
+```{r, warning=FALSE, message=FALSE}
+reorder_within <- function(x, by, within, fun = max, sep = "___", ...) {
+  new_x <- paste(x, within, sep = sep)
+  stats::reorder(new_x, by, FUN = fun)
+}
+
+scale_x_reordered <- function(..., sep = "___") {
+  reg <- paste0(sep, ".+$")
+  ggplot2::scale_x_discrete(labels = function(x) gsub(reg, "", x), ...)
+}
+
+scale_y_reordered <- function(..., sep = "___") {
+  reg <- paste0(sep, ".+$")
+  ggplot2::scale_y_discrete(labels = function(x) gsub(reg, "", x), ...)
+}
+
+enrichment.stats <- rbind(enrichment.stats1, enrichment.stats2, enrichment.stats3, enrichment.stats4)
+enrichment.stats$gs_name <- stringr::str_replace(enrichment.stats$gs_name, "HALLMARK_", "")
+enrichment.stats$gs_name <- stringr::str_replace_all(enrichment.stats$gs_name, "_", " ")
+enrichment.stats$Method <- plyr::revalue(enrichment.stats$Method, c("ODP"="mODP"))
+out <- enrichment.stats %>%
+  filter(gs_cat == "H") %>%
+  ggplot(aes(x = TPE, y = reorder_within(gs_name,  TPE, study), colour = Method)) +
+  geom_point(size = 2) +
+  theme_bw(base_size = 12) +
+  facet_wrap(~study, scales = "free") +
+  scale_y_reordered() +
+  ylab("Hallmark gene sets from MSigDB") +
+  xlab("Proportion of true positives") +
+  scale_color_manual(values=cbbPalette) +
+  theme(axis.text=element_text(size=11),strip.text.x = element_text(size = 20),
+        axis.title=element_text(size=26), legend.text=element_text(size=21), 
+        legend.title=element_text(size=24), axis.text.x = element_text(size = 18))
+
+ggsave(out, width = 20, height = 15, filename = "../analysis/figures/gsea.pdf")
+```
+
+## Figure 6
+
+```{r, message = FALSE, warning = FALSE, fig.width=12}
+# Load simulation results, rename some stuff
+cbbPalette <- c("#000000",  "#009E73",  "#0072B2", "#E69F00", "#56B4E9", "#F0E442", "#D55E00", "#CC79A7")
+ts <- readRDS("../data/simulation_results.rds")
+ts$study <- as.factor(ts$study)
+ts$Method <- as.factor(ts$Method)
+ts$study <- plyr::mapvalues(ts$study, from = c("smoker", "dose", "endotoxin", "kidney"), to = c("Smoker", "Dose", "Endotoxin", "Kidney"))
+ts$Method <- plyr::mapvalues(ts$Method, from = c("ODP" , "LRT", "mLRT","bLRT", "bmLRT"), to = c("mODP", "F-test", "Moderated F-test", "boot F-test", "boot Moderated\nF-test"))
+ts$Method <- factor(ts$Method, levels = levels(ts$Method)[c(5, 3, 4, 1, 2)])
+
+# Plot simulation results: power + fdr control
+p1 <- ts %>%
+  ungroup() %>%
+  group_by(study,Method,true_fdr, nc) %>%
+  summarise(tot_genes = mean(tot_genes)) %>%
+  ggplot(aes(x = true_fdr, y = tot_genes, color = Method, linetype = as.factor(nc))) +
+  geom_smooth(se  = FALSE) +
+  xlab("q-value cutoff") +
+  ylab("Number of significant genes") +
+  theme_bw(base_size = 16) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_manual(values=cbbPalette) +
+  facet_wrap(~study, scales = "free",nrow = 1) +
+  scale_linetype(name = "Unique expression\nprofiles")
+
+p2 <- ts %>%
+  group_by(study,Method,true_fdr, nc) %>% 
+  summarise(est_fdr = mean(est_fdr)) %>% 
+  ggplot(aes(x = true_fdr, y = est_fdr, color = Method, linetype = as.factor(nc))) +
+  geom_smooth(se  = FALSE) +
+  xlab("q-value cutoff") +
+  ylab("Estimated false discovery rate") +
+  ylim(0,.1) + 
+  theme_bw(base_size = 16) +
+  geom_abline(slope = 1, linetype = "dashed", color = "red", size = 1) + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_color_manual(values=cbbPalette) +
+  facet_wrap(~study,  nrow = 1) +
+  coord_fixed()
+
+prow <- plot_grid(p1 + theme(legend.position = "none", axis.title.x = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1)),
+          p2 + theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust =1)),align = "hv",nrow = 2, labels = c("a","b"), label_size = 16)
+
+legend <- get_legend(p1)
+p <- plot_grid( prow, legend, rel_widths = c(3, .6))
+ggsave(p, filename = "../analysis/figures/simulation_study.pdf", width = 12.5, height = 8)
+```
+
+```{r}
+sessionInfo()
+```
+
